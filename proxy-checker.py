@@ -2,7 +2,7 @@ import socket
 import socks
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 CHUNK_SIZE = 1000
 STATS_LOCK = threading.Lock()
@@ -20,14 +20,14 @@ def check_proxy(proxy):
             stats["good"] += 1
             stats["remaining"] -= 1
         return proxy
-    except Exception:
+    except (socket.timeout, ConnectionRefusedError, OSError) as e:
         with STATS_LOCK:
             stats["bad"] += 1
             stats["remaining"] -= 1
         return None
 
 def save_working_proxies(working_proxies, filename="live-proxies.txt"):
-    with open(filename, "a") as f:  # Append mode
+    with open(filename, "a") as f:
         for proxy in working_proxies:
             f.write(proxy + "\n")
 
@@ -59,8 +59,15 @@ def process_chunk(chunk_filename):
 
     working_proxies = []
     with ThreadPoolExecutor(max_workers=10) as executor:
-        results = executor.map(check_proxy, proxies)
-        working_proxies = [proxy for proxy in results if proxy]
+        future_to_proxy = {executor.submit(check_proxy, proxy): proxy for proxy in proxies}
+        for future in as_completed(future_to_proxy):
+            proxy = future_to_proxy[future]
+            try:
+                result = future.result()
+                if result:
+                    working_proxies.append(result)
+            except Exception as e:
+                print(f"Error checking proxy {proxy}: {e}")
 
     save_working_proxies(working_proxies)
     os.remove(chunk_filename)  # Delete chunk file after processing
@@ -73,20 +80,25 @@ def display_stats():
     print("\n")  # Ensure proper formatting when finished
 
 def main():
-    chunk_files = split_file()
-    if not chunk_files:
-        return
+    try:
+        chunk_files = split_file()
+        if not chunk_files:
+            return
 
-    print(f"[*] Split into {len(chunk_files)} chunks of {CHUNK_SIZE} proxies each.")
-    
-    # Start async stats display
-    stats_thread = threading.Thread(target=display_stats, daemon=True)
-    stats_thread.start()
+        print(f"[*] Split into {len(chunk_files)} chunks of {CHUNK_SIZE} proxies each.")
+        
+        # Start async stats display
+        stats_thread = threading.Thread(target=display_stats, daemon=True)
+        stats_thread.start()
 
-    for chunk in chunk_files:
-        process_chunk(chunk)
+        for chunk in chunk_files:
+            process_chunk(chunk)
 
-    print(f"\n[*] Scan complete. Working proxies saved to live-proxies.txt.")
+        print(f"\n[*] Scan complete. Working proxies saved to live-proxies.txt.")
+    except KeyboardInterrupt:
+        print("\n[!] Process interrupted by user. Exiting gracefully...")
+    except Exception as e:
+        print(f"[!] An error occurred: {e}")
 
 if __name__ == "__main__":
     main()
